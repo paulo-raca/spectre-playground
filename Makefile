@@ -7,5 +7,5 @@ ${LIBFLUSH}:
 	make -C armageddon/libflush
 
 test_spectre: test_spectre.cpp ${LIBFLUSH}
-	gcc -I armageddon/libflush/libflush test_spectre.cpp ${LIBFLUSH} -O3 -o test_spectre
+	g++ -I armageddon/libflush/libflush test_spectre.cpp ${LIBFLUSH} -O3 -o test_spectre
 
