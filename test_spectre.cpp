@@ -62,7 +62,10 @@ int find_cache_hit_threshold(libflush_session_t* libflush_session) {
     }
     printf("];\n");
 
-    return (hit_times[(int)(0.9*(test_count-1))] + miss_times[(int)(0.1*(test_count-1))]) / 2;
+
+    int threshold = (hit_times[(int)(0.9*(test_count-1))] + miss_times[(int)(0.1*(test_count-1))]) / 2;
+    printf("Cache threshold: %d\n", threshold);
+    return threshold;
 }
 
 /* Report best guess in value[0] and runner-up in value[1] */
@@ -155,7 +158,6 @@ int main(int argc, const char** argv) {
   }
 
   int cache_threshold = find_cache_hit_threshold(libflush_session);
-  printf("Cache threshold: %d\n", cache_threshold);
 
   memset(array2, 0, sizeof(array2));  /* write to array2 so in RAM not copy-on-write zero pages */
   printf("Reading %d bytes:\n", target_len);
