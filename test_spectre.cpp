@@ -7,8 +7,8 @@
 
 /* FIXME: It's a mistery: Intel manual says cache width is 64 bytes, but it doesn't seem to work reliably with values smaller than 512 */
 #define BRANCH_PREDICT_TRAINING_COUNT 10
-#define CACHE_LINE_SIZE 512
-#define ALIGN_CACHE __attribute__ ((aligned (512)))
+#define CACHE_LINE_SIZE 1024
+#define ALIGN_CACHE __attribute__ ((aligned (CACHE_LINE_SIZE)))
 
 #define MAIN_THREAD_CPU 0
 #define COUNTER_THREAD_CPU 1
