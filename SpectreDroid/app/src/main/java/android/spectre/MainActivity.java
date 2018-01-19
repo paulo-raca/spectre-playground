@@ -31,7 +31,7 @@ public class MainActivity extends AppCompatActivity {
                         Log.i(TAG, "Cache threshold: " + cacheThreshold);
 
 
-                        byte[] raw_data = msg.getBytes();
+                        final byte[] raw_data = msg.getBytes();
                         Spectre.read(raw_data, new Spectre.Callback() {
                             @Override
                             public void onByte(int offset, long pointer, byte bestGuess, int bestScore, byte secondGuess, int secondScore) {
@@ -48,6 +48,12 @@ public class MainActivity extends AppCompatActivity {
                                             secondGuess > 31 && secondGuess < 127 ? (char) secondGuess : '�',
                                             secondScore);
                                 }
+
+                                if (bestGuess != raw_data[offset]) {
+                                    msg += String.format("  --  Actual value: %02x => '%c'",
+                                            raw_data[offset],
+                                            raw_data[offset] > 31 && raw_data[offset] < 127 ? (char) raw_data[offset] : '�');
+                                }
                                 Log.i(TAG, msg);
 
                             }
@@ -58,8 +64,9 @@ public class MainActivity extends AppCompatActivity {
 
                         spectre("Warm up");
                         spectre("Mary had a little lamb");
-                        spectre("Mary had a little lamb");
                         spectre("It's fleece was as white as snow");
+                        spectre("And everywhere that Mary went");
+                        spectre("The lamb was sure to go");
                     }
                 };
                 t.setPriority(Thread.MAX_PRIORITY);
