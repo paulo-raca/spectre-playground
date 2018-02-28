@@ -324,8 +324,8 @@ public:
                   .index = x
               };
               int ioctl_ret = ioctl(fileno(foobar), IOCTL_BOUND_CHECK_BYPASS, &ioctl_request);
-              fclose(foobar);
             }
+            fclose(foobar);
           }
         }
 
@@ -338,7 +338,7 @@ public:
             size_t* functions_array_size_ptr;
 
             fscanf(foobar, " function_array=%p", &functions_array);
-            fscanf(foobar, " function_array_size=%ld", &functions_array_size);
+            fscanf(foobar, " function_array_size=%zd", &functions_array_size);
             fscanf(foobar, " function_array_size_ptr=%p", &functions_array_size_ptr);
             //printf("function_array=%p, function_array_size=%ld, function_array_size_ptr=%p\n", functions_array, functions_array_size, functions_array_size_ptr);
 
@@ -370,9 +370,9 @@ public:
                       .arg3 = cache_probe
                   };
                   int ioctl_ret = ioctl(fileno(foobar), IOCTL_FUNCTION_ARRAY, &ioctl_request);
-                  fclose(foobar);
               }
             }
+            fclose(foobar);
           }
         }
 
@@ -496,7 +496,7 @@ void Java_android_spectre_Spectre_readPtr(JNIEnv *env, jclass cls, jlong ptr, ji
     for (int i=0; i<len; i++) {
         uint8_t value[2];
         int score[2];
-        spectre.readMemoryByte((void*)(ptr+i), (SpectreVariant)variant, value, score);
+        spectre.readMemoryByte((uint8_t*)ptr+i, (SpectreVariant)variant, value, score);
 
         env->CallVoidMethod(resultCallback, callbackMethod, i, ptr+i, (jbyte)value[0], score[0], (jbyte)value[1], score[1]);
     }

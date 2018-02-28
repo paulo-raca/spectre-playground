@@ -15,9 +15,19 @@ public class Spectre {
     }
 
     public enum Variant {
-        BoundsCheckBypass,
-        BranchTargetInjection,
-        RogueDataCacheLoad;
+        BoundsCheckBypass("v1 -- Spectre" ),
+        FunctionsBoundsCheckBypass("v1b -- Function Array"),
+        BranchTargetInjection("v2 -- Branch Target Injection"),
+        RogueDataCacheLoad("v3 -- Meltdown"),
+        BoundsCheckBypassKernel("Kernel v1 -- Spectre" ),
+        FunctionsBoundsCheckBypassKernel("Kernel v1b -- Function Array" ),
+        DirectAccess("Direct Memory Access");
+
+        public final String description;
+
+        Variant(String description) {
+            this.description = description;
+        }
 
         public int value() {
             return 1<<this.ordinal();
