@@ -36,7 +36,7 @@ namespace spectre {
         *
         * The gotcha is that access should be made speculatively, so that we can fetch priviledged data without the CPU realizing it 😈
         */
-        virtual void probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) = 0;
+        virtual void probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) = 0;
 
         /* Report best guess in value[0] and runner-up in value[1] */
         void readMemoryByte(const uint8_t* target_ptr, uint8_t value[2], int score[2]);

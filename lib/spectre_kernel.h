@@ -20,12 +20,10 @@ namespace spectre {
     class KernelDataArrayBoundCheckBypass : public spectre::KernelBase {
         DataArray ALIGN_CACHE data_array;
 
-        virtual void probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe);
+        virtual void probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe);
     };
 
     class KernelFunctionArrayBoundCheckBypass : public spectre::KernelBase {
-        static void exploit(uint8_t mask, const uint8_t* target_ptr, const uint8_t* cache_probe);
-
-        virtual void probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe);
+        virtual void probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe);
     };
 };

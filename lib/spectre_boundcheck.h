@@ -33,9 +33,9 @@ namespace spectre {
 
     class DataArrayBoundCheckBypass : public spectre::Base {
         DataArray ALIGN_CACHE data_array;
-
+        void victim(size_t index);
     public:
-        virtual void probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe);
+        virtual void probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe);
     };
 
     class FunctionArrayBoundCheckBypass : public spectre::Base {
@@ -44,6 +44,6 @@ namespace spectre {
     public:
         static void exploit(uint8_t mask, const uint8_t* target_ptr, const uint8_t* cache_probe);
 
-        virtual void probe_bit(uint8_t mask, const uint8_t* data, const uint8_t* cache_probe);
+        virtual void probe_bit(int tries, uint8_t mask, const uint8_t* data, const uint8_t* cache_probe);
     };
 };
